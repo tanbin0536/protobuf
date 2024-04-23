@@ -766,6 +766,73 @@ struct WireFormat::MessageSetParser {
   const Reflection* reflection;
 };
 
+static bool IsMismatchAllowed(const FieldDescriptor* field_descriptor,
+                              WireFormatLite::WireType wire_type) {
+  switch (field_descriptor->type()) {
+    case FieldDescriptor::TYPE_GROUP:
+    case FieldDescriptor::TYPE_MESSAGE:
+      return wire_type == WireFormatLite::WIRETYPE_LENGTH_DELIMITED ||
+             wire_type == WireFormatLite::WIRETYPE_START_GROUP;
+    case FieldDescriptor::TYPE_STRING:
+    case FieldDescriptor::TYPE_BYTES:
+      return false;
+    case FieldDescriptor::TYPE_INT32:
+    case FieldDescriptor::TYPE_INT64:
+    case FieldDescriptor::TYPE_UINT32:
+    case FieldDescriptor::TYPE_UINT64:
+    case FieldDescriptor::TYPE_SINT32:
+    case FieldDescriptor::TYPE_SINT64:
+    case FieldDescriptor::TYPE_BOOL:
+    case FieldDescriptor::TYPE_ENUM:
+      return wire_type == WireFormatLite::WIRETYPE_LENGTH_DELIMITED;
+    case FieldDescriptor::TYPE_FIXED32:
+    case FieldDescriptor::TYPE_SFIXED32:
+    case FieldDescriptor::TYPE_FLOAT:
+      return wire_type == WireFormatLite::WIRETYPE_LENGTH_DELIMITED;
+    case FieldDescriptor::TYPE_FIXED64:
+    case FieldDescriptor::TYPE_SFIXED64:
+    case FieldDescriptor::TYPE_DOUBLE:
+      return wire_type == WireFormatLite::WIRETYPE_LENGTH_DELIMITED;
+    default:
+      return false;
+  }
+}
+
+const char* HandleMessage(Message* msg, const char* ptr,
+                          internal::ParseContext* ctx, uint64_t tag,
+                          const Reflection* reflection,
+                          const FieldDescriptor* field) {
+  Message* sub_message;
+  if (field->is_repeated()) {
+    sub_message = reflection->AddMessage(msg, field, ctx->data().factory);
+  } else {
+    sub_message = reflection->MutableMessage(msg, field, ctx->data().factory);
+  }
+
+  if (WireFormatLite::GetTagWireType(tag) ==
+      WireFormatLite::WIRETYPE_START_GROUP) {
+    return ctx->ParseGroup(sub_message, ptr, tag);
+  }
+
+  ptr = ctx->ParseMessage(sub_message, ptr);
+
+  // For map entries, if the value is an unknown enum we have to push it
+  // into the unknown field set and remove it from the list.
+  if (ptr != nullptr && field->is_map()) {
+    auto* value_field = field->message_type()->map_value();
+    auto* enum_type = value_field->enum_type();
+    if (enum_type != nullptr &&
+        !internal::cpp::HasPreservingUnknownEnumSemantics(value_field) &&
+        enum_type->FindValueByNumber(sub_message->GetReflection()->GetEnumValue(
+            *sub_message, value_field)) == nullptr) {
+      reflection->MutableUnknownFields(msg)->AddLengthDelimited(
+          field->number(), sub_message->SerializeAsString());
+      reflection->RemoveLast(msg, field);
+    }
+  }
+  return ptr;
+}
+
 const char* WireFormat::_InternalParse(Message* msg, const char* ptr,
                                        internal::ParseContext* ctx) {
   const Descriptor* descriptor = msg->GetDescriptor();
@@ -814,6 +881,25 @@ const char* WireFormat::_InternalParseAndMergeField(
     return internal::UnknownFieldParse(
         tag, reflection->MutableUnknownFields(msg), ptr, ctx);
   }
+  auto zget_tag_wire_type = WireFormatLite::GetTagWireType(tag);
+  auto zwire_type_for_field_type = WireTypeForFieldType(field->type());
+  auto zfield_type = field->type();
+  (void)zget_tag_wire_type;
+  (void)zwire_type_for_field_type;
+  (void)zfield_type;
+
+  if (WireFormatLite::GetTagWireType(tag) !=
+          WireTypeForFieldType(field->type()) &&
+      !IsMismatchAllowed(field, WireFormatLite::GetTagWireType(tag))) {
+    // mismatched wiretype;
+    return internal::UnknownFieldParse(
+        tag, reflection->MutableUnknownFields(msg), ptr, ctx);
+  }
+  if (field->type() == FieldDescriptor::TYPE_MESSAGE ||
+      field->type() == FieldDescriptor::TYPE_GROUP) {
+    return HandleMessage(msg, ptr, ctx, tag, reflection, field);
+  }
+
   if (WireFormatLite::GetTagWireType(tag) !=
       WireTypeForFieldType(field->type())) {
     if (field->is_packable() && WireFormatLite::GetTagWireType(tag) ==
@@ -995,48 +1081,11 @@ const char* WireFormat::_InternalParseAndMergeField(
       return ptr;
     }
 
-    case FieldDescriptor::TYPE_GROUP: {
-      Message* sub_message;
-      if (field->is_repeated()) {
-        sub_message = reflection->AddMessage(msg, field, ctx->data().factory);
-      } else {
-        sub_message =
-            reflection->MutableMessage(msg, field, ctx->data().factory);
-      }
-
-      return ctx->ParseGroup(sub_message, ptr, tag);
-    }
-
+    case FieldDescriptor::TYPE_GROUP:
     case FieldDescriptor::TYPE_MESSAGE: {
-      Message* sub_message;
-      if (field->is_repeated()) {
-        sub_message = reflection->AddMessage(msg, field, ctx->data().factory);
-      } else {
-        sub_message =
-            reflection->MutableMessage(msg, field, ctx->data().factory);
-      }
-      ptr = ctx->ParseMessage(sub_message, ptr);
-
-      // For map entries, if the value is an unknown enum we have to push it
-      // into the unknown field set and remove it from the list.
-      if (ptr != nullptr && field->is_map()) {
-        auto* value_field = field->message_type()->map_value();
-        auto* enum_type = value_field->enum_type();
-        if (enum_type != nullptr &&
-            !internal::cpp::HasPreservingUnknownEnumSemantics(value_field) &&
-            enum_type->FindValueByNumber(
-                sub_message->GetReflection()->GetEnumValue(
-                    *sub_message, value_field)) == nullptr) {
-          reflection->MutableUnknownFields(msg)->AddLengthDelimited(
-              field->number(), sub_message->SerializeAsString());
-          reflection->RemoveLast(msg, field);
-        }
-      }
-
-      return ptr;
+      return HandleMessage(msg, ptr, ctx, tag, reflection, field);
     }
   }
-
   // GCC 8 complains about control reaching end of non-void function here.
   // Let's keep it happy by returning a nullptr.
   return nullptr;
