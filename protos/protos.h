@@ -376,6 +376,19 @@ template <typename T, typename Extendee, typename Extension,
 absl::Status SetExtension(
     Ptr<T> message,
     const ::protos::internal::ExtensionIdentifier<Extendee, Extension>& id,
+    Ptr<Extension> value) {
+  static_assert(!std::is_const_v<T>);
+  auto* message_arena = static_cast<upb_Arena*>(message->GetInternalArena());
+  return ::protos::internal::SetExtension(internal::GetInternalMsg(message),
+                                          message_arena, id.mini_table_ext(),
+                                          internal::GetInternalMsg(value));
+}
+
+template <typename T, typename Extendee, typename Extension,
+          typename = EnableIfProtosClass<T>, typename = EnableIfMutableProto<T>>
+absl::Status SetExtension(
+    Ptr<T> message,
+    const ::protos::internal::ExtensionIdentifier<Extendee, Extension>& id,
     Extension&& value) {
   Extension ext = std::move(value);
   static_assert(!std::is_const_v<T>);
@@ -403,6 +416,15 @@ absl::Status SetExtension(
     Extension&& value) {
   return ::protos::SetExtension(::protos::Ptr(message), id,
                                 std::forward<Extension>(value));
+}
+
+template <typename T, typename Extendee, typename Extension,
+          typename = EnableIfProtosClass<T>>
+absl::Status SetExtension(
+    T* message,
+    const ::protos::internal::ExtensionIdentifier<Extendee, Extension>& id,
+    Ptr<Extension> value) {
+  return ::protos::SetExtension(::protos::Ptr(message), id, value);
 }
 
 template <typename T, typename Extendee, typename Extension,
